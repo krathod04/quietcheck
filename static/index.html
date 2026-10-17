@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuietCheck — Fleet Dispatch</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0e13; --panel:#121720; --panel2:#171d28; --line:#232b38; --text:#e6edf3; --muted:#8b96a5;
+  --ok:#3fb950; --watch:#d29922; --comms:#58a6ff; --net:#a371f7; --grid:#8b949e; --trip:#f0883e;
+  --hw:#f85149; --unk:#e3b341; --risk:#db61a2; --spoof:#39d0d8; --accent:#f0883e;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.4 "IBM Plex Sans",system-ui,sans-serif}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+header{height:56px;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{font-weight:700;font-size:18px;letter-spacing:.2px}
+.brand span{color:var(--accent)}
+.tag{color:var(--muted);font-size:13px}
+.spacer{flex:1}
+.pill{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:12px;color:var(--muted)}
+.pill.hot{border-color:var(--hw);color:var(--hw)}
+button{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;cursor:pointer}
+button:hover{border-color:#3a4558}
+button.danger{border-color:#5a2a2a}
+select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px}
+main{display:grid;grid-template-columns:1fr 440px;height:calc(100% - 56px)}
+#left{position:relative;display:grid;grid-template-rows:1fr 170px;min-width:0}
+#map{background:#0d1117}
+#chartwrap{border-top:1px solid var(--line);padding:10px 14px;background:var(--panel)}
+#chartwrap h4{margin:0 0 4px;font-size:12px;color:var(--muted);font-weight:500;display:flex;gap:14px}
+#chart{width:100%;height:128px;display:block}
+.key{display:inline-flex;align-items:center;gap:5px}
+.key i{width:14px;height:3px;border-radius:2px;display:inline-block}
+aside{border-left:1px solid var(--line);overflow-y:auto;background:var(--panel)}
+section{padding:14px 16px;border-bottom:1px solid var(--line)}
+section h3{margin:0 0 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.kpi{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.kpi .v{font:600 24px "IBM Plex Mono",monospace}
+.kpi .l{font-size:12px;color:var(--muted)}
+.kpi .s{font-size:12px;margin-top:4px}
+.good{color:var(--ok)} .bad{color:var(--hw)}
+.legend{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px}
+.legend div{display:flex;align-items:center;gap:6px}
+.legend b{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-weight:600}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+.faults{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.faults .row{grid-column:1/-1;display:flex;gap:8px}
+.faults .row select{flex:1;min-width:0}
+.target{font-size:12px;color:var(--muted);margin-bottom:8px}
+.target b{color:var(--text)}
+#feed{display:flex;flex-direction:column;gap:8px}
+.ev{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer}
+.ev .top{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
+.ev .top .chip{color:#0b0e13;font-weight:600;border-radius:4px;padding:1px 6px;font-size:11px}
+.ev .txt{margin-top:4px}
+.ev .why{margin:4px 0 0;padding-left:16px;color:var(--muted);font-size:12px}
+.ev.inject{border-left-color:#444c56;opacity:.85}
+.ev.dispatch{border-left-color:var(--hw)}
+.ev.resolved{border-left-color:var(--ok)}
+.ev.action{border-left-color:var(--trip)}
+#detail{position:absolute;top:12px;left:12px;width:420px;max-height:calc(100% - 200px);overflow-y:auto;z-index:500;background:rgba(18,23,32,.97);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:none;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+#detail h2{margin:0;font-size:18px;display:flex;align-items:center;gap:8px}
+#detail .close{position:absolute;top:10px;right:10px;padding:2px 8px}
+.ladder{display:flex;gap:4px;margin:10px 0}
+.ladder span{flex:1;text-align:center;font-size:11px;padding:5px 0;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--muted)}
+.ladder span.on{background:var(--accent);color:#111;border-color:var(--accent);font-weight:700}
+.ladder span.past{color:var(--text)}
+table{width:100%;border-collapse:collapse;font:12px "IBM Plex Mono",monospace}
+th,td{text-align:right;padding:3px 4px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:400}
+td:first-child,th:first-child{text-align:left}
+tr.gasp td{color:var(--hw)} tr.backlog td{color:var(--comms)}
+.reasons{margin:6px 0;padding-left:18px}
+.muted{color:var(--muted)} .small{font-size:12px}
+.leaflet-container{background:#0d1117}
+.leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.8) contrast(.9) saturate(.35)}
+.leaflet-tooltip{background:var(--panel);color:var(--text);border:1px solid var(--line)}
+@media (max-width:900px){main{grid-template-columns:1fr;height:auto}#left{height:70vh}#detail{width:calc(100% - 24px)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Quiet<span>Check</span></div>
+  <div class="tag">Silence is data. A black box for every home battery.</div>
+  <div class="spacer"></div>
+  <span id="conds"></span>
+  <span class="pill mono" id="tick">tick 0</span>
+  <button id="pause">Pause</button>
+  <button id="reset" class="danger">Reset</button>
+</header>
+<main>
+  <div id="left">
+    <div id="map"></div>
+    <div id="detail"></div>
+    <div id="chartwrap">
+      <h4>Dispatchable capacity (kW) over time
+        <span class="key"><i style="background:#e6edf3"></i>Truth</span>
+        <span class="key"><i style="background:var(--accent)"></i>QuietCheck</span>
+        <span class="key"><i style="background:#6e7681"></i>Naive (trust only who talks)</span>
+      </h4>
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
+  <aside>
+    <section>
+      <h3>Tonight's picture</h3>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Real capacity (QuietCheck)</div><div class="v" id="capOurs">–</div><div class="s" id="capErr"></div></div>
+        <div class="kpi"><div class="l">Naive estimate</div><div class="v" id="capNaive">–</div><div class="s" id="capNaiveErr"></div></div>
+        <div class="kpi"><div class="l">Trucks a naive system sends</div><div class="v" id="trNaive">–</div><div class="s muted">one per silent battery</div></div>
+        <div class="kpi"><div class="l">Trucks QuietCheck sends</div><div class="v" id="trOurs">–</div><div class="s" id="trAvoid"></div></div>
+        <div class="kpi"><div class="l">Diagnosis accuracy (vs. truth)</div><div class="v" id="acc">–</div><div class="s muted" id="accN"></div></div>
+        <div class="kpi"><div class="l">Blips ignored (debounce)</div><div class="v" id="blips">–</div><div class="s muted">single dropped packets</div></div>
+      </div>
+    </section>
+    <section>
+      <h3>Fleet</h3>
+      <div class="legend" id="legend"></div>
+    </section>
+    <section>
+      <h3>Inject a fault</h3>
+      <div class="target" id="target">Target: <b>random battery</b> — click a home on the map to choose one</div>
+      <div class="faults">
+        <button data-k="comms_loss">Cut home Wi-Fi</button>
+        <button data-k="trip">Trip battery</button>
+        <button data-k="trip_silent">Trip, no last gasp</button>
+        <button data-k="hw_fail">Cell overheating</button>
+        <button data-k="spoof">Spoof telemetry</button>
+        <button data-k="heatwave" id="heatBtn">Heatwave</button>
+        <div class="row"><select id="feederSel"></select><button data-k="feeder_outage" data-sel="feederSel">Black out feeder</button></div>
+        <div class="row"><select id="carrierSel"></select><button data-k="carrier_outage" data-sel="carrierSel">Drop carrier</button></div>
+        <div class="row"><button data-k="restore" style="flex:1">Restore grid + networks</button></div>
+      </div>
+    </section>
+    <section>
+      <h3>Decision feed</h3>
+      <div id="feed"></div>
+    </section>
+  </aside>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const LABELS = {
+  OK:{c:'--ok',t:'Healthy'}, WATCH:{c:'--watch',t:'Missed check-ins'},
+  COMMS_LOSS:{c:'--comms',t:'Comms loss'}, NETWORK_OUTAGE:{c:'--net',t:'Carrier outage'},
+  GRID_OUTAGE:{c:'--grid',t:'Grid outage'}, TRIPPED:{c:'--trip',t:'Tripped'},
+  HARDWARE_FAILING:{c:'--hw',t:'Hardware failure'}, UNKNOWN:{c:'--unk',t:'Unknown'},
+  AT_RISK:{c:'--risk',t:'At risk'}, TELEMETRY_MISMATCH:{c:'--spoof',t:'Talking but wrong'},
+};
+const EVCOL = {ASK:'--trip',DISPATCH:'--hw',RESOLVED:'--ok',REPLY:'--comms',LAST_GASP:'--hw',BACKLOG:'--comms',INJECT:'--grid',OK:'--ok'};
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const color = l => css((LABELS[l]||LABELS.OK).c);
+const $ = id => document.getElementById(id);
+const api = (p, body) => fetch(p, body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+
+let markers = {}, info = {}, lastLabel = {}, selected = null, lastSeq = 0, detailOpen = null;
+
+// ---- map: Leaflet when online, a self-drawn canvas map when the CDN is unreachable
+const MapView = window.L ? leafletMap() : canvasMap();
+
+function leafletMap(){
+  const map = L.map('map', {preferCanvas:true, zoomControl:false}).setView([34.045,-118.29], 12);
+  L.control.zoom({position:'topright'}).addTo(map);
+  // free OpenStreetMap tiles (no API key), darkened with a CSS filter
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(map);
+  const ms = {};
+  return {
+    add(b){ const real = b.feeder === 'EXT';
+      const m = L.circleMarker([b.lat,b.lon], {radius: real?11:(b.medical?6:4), weight: real?3:(b.medical?2:0),
+        color: real?'#58a6ff':'#fff', fillColor:color('OK'), fillOpacity:.6}).addTo(map);
+      if (real) { m.bindTooltip(`${b.id} · REAL DEVICE`, {permanent:true, direction:'right', offset:[12,0]}); }
+      else m.bindTooltip(`${b.id} · ${b.feeder} · ${b.carrier}${b.medical?' · medical device':''}`);
+      m.on('click', () => select(b.id)); ms[b.id] = m; },
+    set(id,label){ const m = ms[id], b = info[id];
+      m.setStyle({fillColor:color(label), fillOpacity: label==='OK'?.55:.95});
+      const real = b.feeder === 'EXT';
+      m.setRadius(real ? 11 : label==='OK' ? (b.medical?6:4) : (b.medical?9:7));
+      if (label!=='OK' || real) m.bringToFront(); },
+    focus(id){ ms[id] && map.panTo(ms[id].getLatLng()); },
+    draw(){}
+  };
+}
+
+function canvasMap(){
+  const host = $('map'), c = document.createElement('canvas');
+  c.style.cssText = 'width:100%;height:100%;display:block;cursor:crosshair';
+  host.appendChild(c);
+  const note = document.createElement('div');
+  note.textContent = 'Offline map (map tiles unavailable)';
+  note.style.cssText = 'position:absolute;right:12px;top:12px;font-size:11px;color:var(--muted)';
+  host.style.position='relative'; host.appendChild(note);
+  const pts = []; let proj = null;
+  function fit(){
+    const w = c.clientWidth, h = c.clientHeight;
+    const la = pts.map(p=>p.lat), lo = pts.map(p=>p.lon);
+    const [a,b,x0,x1] = [Math.min(...la),Math.max(...la),Math.min(...lo),Math.max(...lo)];
+    const kx = Math.cos(34*Math.PI/180), pad = 30;
+    const s = Math.min((w-2*pad)/((x1-x0)*kx), (h-2*pad)/(b-a));
+    const ox = (w - (x1-x0)*kx*s)/2, oy = (h - (b-a)*s)/2;
+    proj = p => [ox + (p.lon-x0)*kx*s, oy + (b-p.lat)*s];
+  }
+  function draw(){
+    const dpr = devicePixelRatio||1, w = c.clientWidth, h = c.clientHeight;
+    c.width = w*dpr; c.height = h*dpr; const g = c.getContext('2d'); g.scale(dpr,dpr);
+    if (!pts.length) return; fit();
+    const order = pts.slice().sort((p,q)=>(p.label==='OK')-(q.label==='OK')).reverse();
+    for (const p of order){
+      const [x,y] = proj(p), r = p.label==='OK' ? (p.medical?4.5:3) : (p.medical?8:6);
+      g.beginPath(); g.arc(x,y,r,0,7); g.globalAlpha = p.label==='OK'?.55:.95;
+      g.fillStyle = color(p.label); g.fill(); g.globalAlpha = 1;
+      if (p.medical){ g.lineWidth=1.5; g.strokeStyle='#fff'; g.stroke(); }
+      if (p.id===selected){ g.lineWidth=2; g.strokeStyle='#fff'; g.beginPath(); g.arc(x,y,r+4,0,7); g.stroke(); }
+    }
+  }
+  c.addEventListener('click', e => {
+    if (!proj) return; const r = c.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
+    let best=null, bd=144;
+    for (const p of pts){ const [x,y]=proj(p), d=(x-mx)**2+(y-my)**2; if (d<bd){bd=d;best=p;} }
+    if (best) select(best.id);
+  });
+  addEventListener('resize', draw);
+  const byId = {};
+  return {
+    add(b){ const p = {...b, label:'OK', medical: b.medical || b.feeder==='EXT'}; pts.push(p); byId[b.id]=p; },
+    set(id,label){ byId[id].label = label; },
+    focus(){}, draw
+  };
+}
+
+function addMarker(b){
+  if (markers[b.id]) return;
+  info[b.id] = b; markers[b.id] = true; MapView.add(b);
+}
+
+function select(id){
+  selected = id;
+  $('target').innerHTML = `Target: <b>${id}</b> <button id="clr" style="padding:1px 6px;margin-left:6px">random</button>`;
+  $('clr').onclick = e => {e.stopPropagation(); selected=null; $('target').innerHTML='Target: <b>random battery</b> — click a home on the map to choose one'};
+  openDetail(id);
+}
+
+async function openDetail(id){
+  detailOpen = id;
+  const d = await api('/api/battery/'+id);
+  if (d.detail) return;
+  const steps = d.ladder_steps, idx = steps.indexOf(d.ladder);
+  const lad = steps.map((s,i)=>`<span class="${i===idx?'on':i<idx?'past':''}">${s}</span>`).join('');
+  const rows = d.blackbox.slice().reverse().map(r=>`<tr class="${r.last_gasp?'gasp':r.backlog?'backlog':''}">
+     <td>${r.tick}${r.last_gasp?' GASP':r.backlog?' FWD':''}</td><td>${r.mode||''}</td><td>${(r.power_kw??0).toFixed(1)}</td>
+     <td>${(r.soc??0).toFixed(1)}</td><td>${(r.temp_c??0).toFixed(1)}</td><td>${(r.voltage??0).toFixed(0)}</td><td>${r.fault||''}</td></tr>`).join('');
+  const contacts = d.contact_log.map(c=>`<div class="small"><span class="muted">${c.dir==='out'?'→ '+c.channel:'← reply'} · t${c.tick}</span> ${c.text}</div>`).join('');
+  $('detail').innerHTML = `<button class="close" onclick="closeDetail()">✕</button>
+    <h2><span class="dot" style="background:${color(d.label)}"></span>${d.id} — ${d.title}</h2>
+    <div class="muted small">${d.feeder} · ${d.carrier}${d.medical?' · <b style="color:var(--hw)">medical device in home</b>':''}${d.external?' · <b style="color:var(--comms)">REAL DEVICE</b>':''}</div>
+    ${d.label!=='OK'?`<div class="small" style="margin-top:8px">Confidence <b class="mono">${Math.round(d.confidence*100)}%</b>${d.truth?` · <span class="muted">sim truth: ${d.truth}</span>`:''}</div>
+      <ul class="reasons small">${d.reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
+    <div class="ladder">${lad}</div>
+    ${contacts?`<div style="margin:8px 0">${contacts}</div>`:''}
+    <h3 style="margin:12px 0 6px;font-size:12px;color:var(--muted);letter-spacing:.08em">BLACK BOX — LAST ${d.blackbox.length} RECORDS</h3>
+    <table><tr><th>tick</th><th>mode</th><th>kW</th><th>SoC%</th><th>°C</th><th>V</th><th>fault</th></tr>${rows}</table>`;
+  $('detail').style.display = 'block';
+}
+function closeDetail(){ $('detail').style.display='none'; detailOpen=null; }
+
+function renderLegend(counts){
+  $('legend').innerHTML = Object.entries(LABELS).map(([k,v])=>
+    `<div><span class="dot" style="background:${color(k)}"></span>${v.t}<b>${counts[k]||0}</b></div>`).join('');
+}
+
+function renderFeed(events){
+  if (!events.length) return;
+  lastSeq = Math.max(lastSeq, ...events.map(e=>e.seq));
+  const feed = $('feed');
+  for (const e of events.slice().reverse()){
+    const col = LABELS[e.label] ? color(e.label) : css(EVCOL[e.label]||'--grid');
+    const el = document.createElement('div');
+    el.className = 'ev '+e.kind;
+    if (e.kind==='decision') el.style.borderLeftColor = col;
+    const name = LABELS[e.label]?.t || e.label.replace('_',' ');
+    el.innerHTML = `<div class="top"><span class="chip" style="background:${col}">${name}</span>
+       <span class="mono">${e.id}</span>${e.medical?'<span style="color:var(--hw)">medical</span>':''}
+       <span class="spacer"></span><span class="mono">t${e.tick}${e.kind==='decision'?' · '+Math.round(e.confidence*100)+'%':''}</span></div>
+       <div class="txt">${e.text}</div>
+       ${e.kind==='decision'&&e.reasons.length?`<ul class="why">${e.reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}`;
+    if (e.id!=='SIM') el.onclick = () => { select(e.id); MapView.focus(e.id); };
+    feed.prepend(el);
+  }
+  while (feed.children.length > 120) feed.lastChild.remove();
+}
+
+function drawChart(h){
+  const c = $('chart'), dpr = devicePixelRatio||1;
+  const w = c.clientWidth, ht = c.clientHeight;
+  c.width = w*dpr; c.height = ht*dpr;
+  const g = c.getContext('2d'); g.scale(dpr,dpr); g.clearRect(0,0,w,ht);
+  if (h.length < 2) return;
+  const vals = h.flatMap(p=>[p.truth,p.ours,p.naive]);
+  const max = Math.max(...vals)*1.05, min = Math.max(0, Math.min(...vals)*0.9);
+  const x = i => 40 + i*(w-50)/(h.length-1), y = v => 8 + (ht-24)*(1-(v-min)/(max-min||1));
+  g.font = '11px IBM Plex Mono'; g.fillStyle = css('--muted'); g.strokeStyle = css('--line');
+  for (let k=0;k<=3;k++){ const v=min+(max-min)*k/3; g.beginPath(); g.moveTo(40,y(v)); g.lineTo(w-10,y(v)); g.stroke(); g.fillText(Math.round(v),2,y(v)+4); }
+  const line = (key,col,wd,dash) => { g.beginPath(); g.setLineDash(dash||[]); g.strokeStyle=col; g.lineWidth=wd;
+    h.forEach((p,i)=> i?g.lineTo(x(i),y(p[key])):g.moveTo(x(i),y(p[key]))); g.stroke(); g.setLineDash([]); };
+  line('naive','#6e7681',2,[4,3]); line('truth','#e6edf3',2); line('ours',css('--accent'),2.5);
+}
+
+function renderMetrics(m){
+  $('tick').textContent = 'tick '+m.tick;
+  const cap = m.capacity, tr = m.trucks;
+  $('capOurs').textContent = (cap.ours/1000).toFixed(2)+' MW';
+  $('capNaive').textContent = (cap.naive/1000).toFixed(2)+' MW';
+  const pct = (e)=> cap.truth ? (100*e/cap.truth).toFixed(1)+'%' : '–';
+  $('capErr').innerHTML = `<span class="${cap.err_ours<cap.err_naive||cap.err_ours<50?'good':'bad'}">off by ${pct(cap.err_ours)}</span> <span class="muted">truth ${(cap.truth/1000).toFixed(2)} MW</span>`;
+  $('capNaiveErr').innerHTML = `<span class="${cap.err_naive>50?'bad':'muted'}">off by ${pct(cap.err_naive)}</span>`;
+  $('trNaive').textContent = tr.naive;
+  $('trOurs').textContent = tr.ours;
+  $('trAvoid').innerHTML = `<span class="good">${Math.max(0,tr.naive-tr.ours)} avoided now</span> <span class="muted">· ${tr.resolved_remotely} fixed remotely</span>`;
+  $('acc').textContent = m.accuracy.pct+'%';
+  $('accN').textContent = `${m.accuracy.correct}/${m.accuracy.total} abnormal batteries named correctly`;
+  $('blips').textContent = tr.blips_ignored;
+  $('heatBtn').textContent = m.heatwave ? 'Heatwave: ON' : 'Heatwave';
+  const conds = [];
+  if (m.heatwave) conds.push('<span class="pill hot">Heatwave</span>');
+  m.feeders_out.forEach(f=>conds.push(`<span class="pill hot">${f} dark</span>`));
+  m.carriers_out.forEach(c=>conds.push(`<span class="pill hot">${c} down</span>`));
+  $('conds').innerHTML = conds.join(' ');
+  renderLegend(m.counts);
+}
+
+async function poll(){
+  try{
+    const s = await api('/api/state?since='+lastSeq);
+    s.externals.forEach(addMarker);
+    for (const [id,label] of s.statuses){
+      if (!markers[id]) continue;
+      if (lastLabel[id] !== label){ lastLabel[id] = label; MapView.set(id, label); }
+    }
+    MapView.draw();
+    renderMetrics(s.metrics); renderFeed(s.feed); drawChart(s.history);
+    $('pause').textContent = s.running ? 'Pause' : 'Resume';
+    if (detailOpen) openDetail(detailOpen);
+  }catch(e){ console.warn(e); }
+}
+
+document.querySelectorAll('[data-k]').forEach(b => b.onclick = async () => {
+  const k = b.dataset.k;
+  let target = null;
+  if (b.dataset.sel) target = $(b.dataset.sel).value;
+  else if (['comms_loss','trip','trip_silent','hw_fail','spoof'].includes(k)) target = selected;
+  await api('/api/inject', {kind:k, target}); poll();
+});
+$('pause').onclick = async () => { await api('/api/pause', {}); poll(); };
+$('reset').onclick = async () => { await api('/api/reset', {}); lastSeq=0; $('feed').innerHTML=''; closeDetail(); poll(); };
+
+(async () => {
+  const d = await api('/api/init');
+  d.batteries.forEach(addMarker);
+  $('feederSel').innerHTML = d.options.feeders.map(f=>`<option>${f}</option>`).join('');
+  $('carrierSel').innerHTML = d.options.carriers.map(f=>`<option>${f}</option>`).join('');
+  poll(); setInterval(poll, 1000);
+})();
+</script>
+</body>
+</html>
