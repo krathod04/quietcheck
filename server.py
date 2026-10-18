@@ -17,13 +17,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from quietcheck.fleet import Fleet
+from quietcheck.notify import Notifier
 
 TICK_SECONDS = float(os.getenv("TICK_SECONDS", "2"))
 N_BATTERIES = int(os.getenv("N_BATTERIES", "500"))
 STATIC = Path(__file__).parent / "static"
 
-fleet = Fleet(n=N_BATTERIES)
+fleet = Fleet(n=N_BATTERIES, region=os.getenv("REGION", "la"))
 running = {"on": True}
+notifier = Notifier()   # real-phone alerts for real devices (set NTFY_TOPIC)
 
 
 async def ticker():
@@ -31,6 +33,7 @@ async def ticker():
         await asyncio.sleep(TICK_SECONDS)
         if running["on"]:
             fleet.step()
+            notifier.check(fleet.engine)
 
 
 @asynccontextmanager
@@ -57,6 +60,17 @@ async def init():
                            "carrier": b.carrier, "medical": b.medical}
                           for b in eng.batteries.values()],
             "options": fleet.options(), "tick_seconds": TICK_SECONDS}
+
+
+@app.post("/api/region")
+async def region(payload: dict):
+    """Switch the whole fleet to another city preset (Twist 2): {"region": "mumbai"}"""
+    from quietcheck.regions import REGIONS
+    key = payload.get("region")
+    if key not in REGIONS:
+        raise HTTPException(400, f"unknown region; choose one of {sorted(REGIONS)}")
+    fleet.reset(region=key)
+    return {"ok": True, "region": key}
 
 
 @app.get("/api/state")
