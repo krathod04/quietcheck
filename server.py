@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from quietcheck.fleet import Fleet
@@ -34,6 +34,7 @@ async def ticker():
         if running["on"]:
             fleet.step()
             notifier.check(fleet.engine)
+            notifier.alarms(fleet.alarms)
 
 
 @asynccontextmanager
@@ -59,7 +60,8 @@ async def init():
     return {"batteries": [{"id": b.id, "lat": b.lat, "lon": b.lon, "feeder": b.feeder,
                            "carrier": b.carrier, "medical": b.medical}
                           for b in eng.batteries.values()],
-            "options": fleet.options(), "tick_seconds": TICK_SECONDS}
+            "options": fleet.options(), "tick_seconds": TICK_SECONDS,
+            "gateways": fleet.gateway_points()}
 
 
 @app.post("/api/region")
@@ -81,7 +83,42 @@ async def state(since: int = 0):
                  for b in eng.batteries.values() if b.external]
     return {"metrics": fleet.metrics(), "statuses": fleet.statuses(),
             "feed": [e for e in list(eng.feed)[:80] if e["seq"] > since],
-            "history": fleet.history[-90:], "externals": externals, "running": running["on"]}
+            "history": fleet.history[-90:], "externals": externals, "running": running["on"],
+            "alarms": [a for a in fleet.alarms if not a["acked"]],
+            "tickets": [_brief(t) for t in fleet.tickets.list(limit=40)]}
+
+
+def _brief(t):
+    return {k: t[k] for k in ("id", "kind", "title", "scope", "key", "severity", "status", "opened_tick",
+                              "closed_tick", "naive_visits", "our_visits")} | {"n": len(t["batteries"])}
+
+
+# ---------------------------------------------------------------- tickets (investigation reports)
+@app.get("/api/tickets")
+async def tickets(battery: str | None = None, status: str | None = None, limit: int = 200):
+    """All tickets, or one house's history with ?battery=B012. Newest open first."""
+    return {"summary": fleet.tickets.summary(), "tickets": fleet.tickets.list(battery, status, limit)}
+
+
+@app.get("/api/tickets.csv")
+async def tickets_csv():
+    """One row per ticket per battery (house), for analysis in a spreadsheet."""
+    return PlainTextResponse(fleet.tickets.csv(fleet.sim), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=quietcheck_tickets.csv"})
+
+
+@app.get("/api/tickets/{ticket_id}")
+async def ticket(ticket_id: str):
+    t = fleet.tickets.items.get(ticket_id)
+    if t is None:
+        raise HTTPException(404, "unknown ticket")
+    return t
+
+
+@app.post("/api/alarms/ack")
+async def ack(payload: dict):
+    fleet.ack_alarm(int(payload.get("id", 0)))
+    return {"ok": True}
 
 
 @app.get("/api/battery/{battery_id}")
@@ -91,6 +128,7 @@ async def battery(battery_id: str):
         raise HTTPException(404, "unknown battery")
     sb = fleet.sim.batteries.get(battery_id)
     d["truth"] = fleet.sim.truth(sb) if sb else None
+    d["tickets"] = [_brief(t) for t in fleet.tickets.list(battery=battery_id)]
     return d
 
 
