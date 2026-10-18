@@ -14,23 +14,11 @@ import math
 import random
 from dataclasses import dataclass, field
 
-CARRIERS = ["Verizon", "T-Mobile", "AT&T"]
+from .regions import DEFAULT_REGION, REGIONS
 
-# Rough neighborhood centers across LA used as feeder locations.
-FEEDERS = [
-    ("F01 University Park", 34.0224, -118.2851),
-    ("F02 Koreatown", 34.0618, -118.3005),
-    ("F03 Silver Lake", 34.0869, -118.2702),
-    ("F04 Highland Park", 34.1115, -118.1923),
-    ("F05 Boyle Heights", 34.0339, -118.2050),
-    ("F06 Leimert Park", 34.0050, -118.3320),
-    ("F07 Inglewood", 33.9617, -118.3531),
-    ("F08 Culver City", 34.0211, -118.3965),
-    ("F09 Mid-City", 34.0420, -118.3480),
-    ("F10 Hollywood", 34.0980, -118.3270),
-    ("F11 Eagle Rock", 34.1390, -118.2120),
-    ("F12 South Park", 33.9870, -118.2700),
-]
+CARRIERS = REGIONS[DEFAULT_REGION]["carriers"]  # default region, kept for old imports
+
+FEEDERS = REGIONS[DEFAULT_REGION]["feeders"]
 
 TICK_HOURS = 30 / 3600  # each tick represents 30 seconds
 
@@ -43,6 +31,7 @@ class SimBattery:
     feeder: str
     carrier: str
     medical: bool
+    has_meter: bool = True
     capacity_kwh: float = 13.5
     max_kw: float = 5.0
     soc: float = 70.0
@@ -75,19 +64,24 @@ class Simulator:
     carriers_out: set = field(default_factory=set)
     blip_rate: float = 0.004  # chance a healthy check-in is randomly dropped
     replies: list = field(default_factory=list)
+    region: str = DEFAULT_REGION
 
     def __post_init__(self):
         self.rng = random.Random(self.seed)
+        reg = REGIONS[self.region]
+        self.feeders, self.carriers = reg["feeders"], reg["carriers"]
+        sy, sx = reg["spread"]
         self.batteries: dict[str, SimBattery] = {}
         for i in range(self.n):
-            fname, flat, flon = FEEDERS[i % len(FEEDERS)]
+            fname, flat, flon = self.feeders[i % len(self.feeders)]
             b = SimBattery(
                 id=f"B{i:03d}",
-                lat=flat + self.rng.gauss(0, 0.011),
-                lon=flon + self.rng.gauss(0, 0.013),
+                lat=flat + self.rng.gauss(0, sy),
+                lon=flon + self.rng.gauss(0, sx),
                 feeder=fname,
-                carrier=self.rng.choices(CARRIERS, weights=[45, 33, 22])[0],
+                carrier=self.rng.choices(self.carriers, weights=reg["carrier_weights"])[0],
                 medical=self.rng.random() < 0.06,
+                has_meter=self.rng.random() < reg["meter_coverage"],
                 soc=self.rng.uniform(35, 98),
                 home_load_kw=self.rng.uniform(0.6, 3.5),
             )
@@ -106,7 +100,7 @@ class Simulator:
     def static_info(self) -> list[dict]:
         return [
             {"id": b.id, "lat": round(b.lat, 5), "lon": round(b.lon, 5), "feeder": b.feeder,
-             "carrier": b.carrier, "medical": b.medical, "max_kw": b.max_kw}
+             "carrier": b.carrier, "medical": b.medical, "max_kw": b.max_kw, "has_meter": b.has_meter}
             for b in self.batteries.values()
         ]
 
@@ -141,13 +135,13 @@ class Simulator:
             b = pick(); b.spoof = True; b.spoof_soc = round(b.soc, 1)
             return f"{b.id}: telemetry spoofed -- claims 5 kW discharge, actually offline"
         if kind == "feeder_outage":
-            f = target if target in {f[0] for f in FEEDERS} else rng.choice(
-                [f[0] for f in FEEDERS if f[0] not in self.feeders_out])
+            f = target if target in {f[0] for f in self.feeders} else rng.choice(
+                [f[0] for f in self.feeders if f[0] not in self.feeders_out])
             self.feeders_out.add(f)
             return f"Grid outage on feeder {f}"
         if kind == "carrier_outage":
-            c = target if target in CARRIERS else rng.choice(
-                [c for c in CARRIERS if c not in self.carriers_out] or CARRIERS)
+            c = target if target in self.carriers else rng.choice(
+                [c for c in self.carriers if c not in self.carriers_out] or self.carriers)
             self.carriers_out.add(c)
             return f"Cellular outage: {c} network down"
         if kind == "heatwave":
@@ -259,7 +253,7 @@ class Simulator:
                 checkins.append(rec)
 
             # smart meter (separate AMI network, but needs grid power)
-            if not grid_down:
+            if not grid_down and b.has_meter:
                 meters.append({"id": b.id, "tick": t,
                                "import_kw": round(b.home_load_kw - actual_kw, 2)})
 

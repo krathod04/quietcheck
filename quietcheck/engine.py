@@ -84,6 +84,7 @@ class Engine:
         self.tick = 0
         self.heatwave = False
         self.feed: deque = deque(maxlen=200)
+        self.contact = {"channel": "SMS", "language": "English"}  # set per region by Fleet
         self.outbox: list[dict] = []      # homeowner contacts for the outside world
         self.stats = {"blips_ignored": 0, "trucks_avoided": 0, "trucks_sent": 0,
                       "resolved_remotely": 0}
@@ -234,7 +235,16 @@ class Engine:
             return "COMMS_LOSS", 0.65, reasons
 
         if not has_meter:
-            reasons.append("No smart meter paired with this unit")
+            # Low smart-meter coverage (e.g. Mumbai): borrow the evidence from neighbours instead
+            if fs and fs["meters"] >= 3 and fs["meter_silent_frac"] >= 0.5:
+                reasons.append(f"No meter of its own, but {fs['meter_silent']}/{fs['meters']} meters on "
+                               f"{b.feeder} are dark")
+                return "GRID_OUTAGE", 0.8, reasons
+            if cs and cs["silent"] >= 5 and cs["silent_frac"] >= 0.25:
+                reasons.append(f"No meter of its own, but {cs['silent']}/{cs['total']} metered batteries on "
+                               f"{b.carrier} went quiet together")
+                return "NETWORK_OUTAGE", 0.78, reasons
+            reasons.append("No smart meter paired with this unit and its neighbours look fine")
         else:
             reasons.append("This home's meter is also silent, but the feeder is mostly fine")
         return "UNKNOWN", 0.4, reasons
@@ -264,15 +274,37 @@ class Engine:
                 return "AT_RISK", 0.8, trend + ["Still talking -- act before it fails"]
         return "OK", 1.0, []
 
+    def _fleet_temp(self, window: int) -> tuple[float, float]:
+        """Median temperature rise and median current temperature across talking batteries.
+        Weather (a heatwave) warms the whole fleet at once; a failing cell warms alone."""
+        key = (self.tick, window)
+        if getattr(self, "_fleet_cache_key", None) == key:
+            return self._fleet_cache
+        rises, temps = [], []
+        for o in self.batteries.values():
+            if self.tick - o.last_seen > 1:
+                continue
+            rr = [r for r in o.blackbox if not r.get("last_gasp") and not r.get("backlog")][-window:]
+            if len(rr) >= 3:
+                rises.append(rr[-1]["temp_c"] - rr[0]["temp_c"])
+                temps.append(rr[-1]["temp_c"])
+        med = lambda xs: sorted(xs)[len(xs) // 2] if xs else 0.0
+        self._fleet_cache_key, self._fleet_cache = key, (med(rises), med(temps) if temps else 26.0)
+        return self._fleet_cache
+
     def _trend(self, b, window: int = 6) -> list[str]:
         recs = [r for r in b.blackbox if not r.get("last_gasp") and not r.get("backlog")][-window:]
         if len(recs) < 3:
             return []
         out = []
         dt = recs[-1]["temp_c"] - recs[0]["temp_c"]
-        if recs[-1]["temp_c"] >= 58 or dt >= 12:
+        fleet_rise, fleet_temp = self._fleet_temp(window)
+        excess_rise = dt - max(0.0, fleet_rise)
+        excess_temp = recs[-1]["temp_c"] - fleet_temp
+        if excess_temp >= 20 or excess_rise >= 12:
+            note = (f" while the fleet rose {fleet_rise:.0f} C" if fleet_rise >= 3 else "")
             out.append(f"Black box: temperature climbed {recs[0]['temp_c']:.0f} -> {recs[-1]['temp_c']:.0f} C "
-                       f"over the last {len(recs)} check-ins")
+                       f"over the last {len(recs)} check-ins{note}")
         dv = recs[0]["voltage"] - recs[-1]["voltage"]
         if dv >= 15:
             out.append(f"Black box: pack voltage sagged {dv:.0f} V before it went quiet")
@@ -389,7 +421,7 @@ class Engine:
     def _ask(self, b, tick, kind):
         b.asked = True
         b.ladder, b.ladder_since = "ASK", tick
-        channel = "voice call" if b.medical else "text"
+        channel = "voice call" if b.medical else self.contact["channel"]
         text = {
             "reset": "Your home battery stopped responding. Is its light red? Press RESET for 3 s. Reply 1 = done, 2 = still red.",
             "router": "We can't reach your battery. Could you restart your internet router? Reply 1 when done.",
@@ -397,7 +429,9 @@ class Engine:
         }[kind]
         b.contact_log.append({"tick": tick, "dir": "out", "channel": channel, "text": text})
         self.outbox.append({"id": b.id, "kind": kind, "channel": channel})
-        self._event(b, "ASK", f"Homeowner contacted by {channel}: “{text}”", kind="action")
+        lang = self.contact["language"]
+        sent = f" (sent in {lang})" if lang != "English" and not b.medical else ""
+        self._event(b, "ASK", f"Homeowner contacted by {channel}{sent}: “{text}”", kind="action")
 
     def _dispatch(self, b, tick, why):
         b.dispatched = True
@@ -414,8 +448,18 @@ class Engine:
             return
         b.contact_log.append({"tick": tick, "dir": "in", "text": text})
         self._event(b, "REPLY", f"Homeowner: “{text}”", kind="signal")
-        if "RED" in text.upper() and b.label in ("TRIPPED", "UNKNOWN") and not b.dispatched:
+        up = text.upper()
+        if "RED" in up and b.label in ("TRIPPED", "UNKNOWN", "COMMS_LOSS") and not b.dispatched:
             self._dispatch(b, tick, "Homeowner reports a red fault light")
+        elif "RESET" in up and b.label in ("COMMS_LOSS", "UNKNOWN"):
+            # the homeowner's answer contradicts the guess: learn from it, out loud
+            was = LABELS[b.label]["title"].lower()
+            b.confidence = 0.9
+            b.reasons = [f"Initial guess was {was} (battery was idle, so the meter couldn't tell)",
+                         "Homeowner had to press RESET: the battery had tripped"]
+            b.label, b.diag_since = "TRIPPED", tick
+            self._event(b, "CORRECTED", f"Diagnosis corrected: {was} -> tripped, based on the homeowner's reply",
+                        kind="decision")
 
     def _on_return(self, b, tick):
         prev = b.label

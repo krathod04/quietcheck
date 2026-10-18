@@ -2,19 +2,24 @@
 from __future__ import annotations
 
 from .engine import Engine, LABELS
-from .sim import CARRIERS, FEEDERS, Simulator
+from .regions import DEFAULT_REGION, REGIONS, public
+from .sim import Simulator
 
 SILENT = {k for k, v in LABELS.items() if v["silent"]} - {"WATCH"}
 
 
 class Fleet:
-    def __init__(self, n: int = 500, seed: int = 7, virtual_meters: bool = True):
-        self.n, self.seed, self.virtual_meters = n, seed, virtual_meters
+    def __init__(self, n: int = 500, seed: int = 7, virtual_meters: bool = True, region: str = DEFAULT_REGION):
+        self.n, self.seed, self.virtual_meters, self.region = n, seed, virtual_meters, region
         self.reset()
 
-    def reset(self):
-        self.sim = Simulator(n=self.n, seed=self.seed)
+    def reset(self, region: str | None = None):
+        if region in REGIONS:
+            self.region = region
+        self.sim = Simulator(n=self.n, seed=self.seed, region=self.region)
         self.engine = Engine()
+        reg = REGIONS[self.region]
+        self.engine.contact = {"channel": reg["channel"], "language": reg["language"]}
         for info in self.sim.static_info():
             self.engine.register(info)
         self.history: list[dict] = []
@@ -111,4 +116,6 @@ class Fleet:
                 for b in self.engine.batteries.values()]
 
     def options(self) -> dict:
-        return {"feeders": [f[0] for f in FEEDERS], "carriers": CARRIERS}
+        return {"feeders": [f[0] for f in self.sim.feeders], "carriers": list(self.sim.carriers),
+                "region": public(self.region),
+                "regions": [{"key": k, "label": v["label"]} for k, v in REGIONS.items()]}
