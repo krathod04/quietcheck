@@ -134,6 +134,53 @@ class FaultTests(unittest.TestCase):
         self.assertEqual(self.label(bid), "HARDWARE_FAILING")
 
 
+class GatewayAndTicketTests(unittest.TestCase):
+    def setUp(self):
+        self.f = Fleet(n=500, seed=7, tickets_log="")
+        self.f.sim.blip_rate = 0.0
+
+    def test_gateway_fault_sends_one_engineer(self):
+        f = self.f
+        f.inject("gateway_fail", "GW-F03-2")
+        run(f, 5)
+        homes = [b for b in f.engine.batteries.values() if b.gateway == "GW-F03-2"]
+        self.assertTrue(all(b.label == "GATEWAY_FAULT" for b in homes), {b.label for b in homes})
+        self.assertEqual(f.engine.stats["trucks_sent"], 1)
+        t = [t for t in f.tickets.list() if t["kind"] == "GATEWAY_FAULT"][0]
+        self.assertEqual((t["naive_visits"], t["our_visits"]), (len(homes), 1))
+        run(f, 15)  # the engineer repairs it
+        self.assertTrue(all(b.label == "OK" for b in homes))
+        self.assertEqual(f.tickets.items[t["id"]]["status"], "closed")
+
+    def test_lone_wifi_loss_is_not_a_gateway_fault(self):
+        bid = pick_discharging(self.f)
+        self.f.inject("comms_loss", bid)
+        run(self.f, 5)
+        self.assertEqual(self.f.engine.batteries[bid].label, "COMMS_LOSS")
+
+    def test_tickets_recorded_per_house(self):
+        bid = pick_discharging(self.f)
+        self.f.inject("trip", bid)
+        run(self.f, 14)
+        hist = self.f.tickets.list(battery=bid)
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["status"], "closed")
+        self.assertIn(bid, self.f.tickets.csv(self.f.sim))
+
+    def test_heatwave_plan_acts_before_failures(self):
+        f = self.f
+        f.inject("heatwave")
+        run(f, 3)
+        plan = [t for t in f.tickets.list() if t["kind"] == "HEATWAVE_PREP"]
+        self.assertEqual(len(plan), 1)
+        self.assertGreater(len(f.heat_plan["precharge"]), 0)
+        self.assertTrue(any(a["level"] == "warning" for a in f.alarms))
+        self.assertEqual(f.engine.counts()["AT_RISK"], 0)
+        f.inject("heatwave")
+        run(f, 2)
+        self.assertEqual(f.tickets.items[plan[0]["id"]]["status"], "closed")
+
+
 class RegionTests(unittest.TestCase):
     def test_every_region_handles_outages(self):
         from quietcheck.regions import REGIONS
