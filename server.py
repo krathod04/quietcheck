@@ -115,6 +115,13 @@ async def ticket(ticket_id: str):
     return t
 
 
+@app.post("/api/push/claim")
+async def push_claim(payload: dict | None = None):
+    """Alerts the server couldn't deliver (ntfy rate limit); the dashboard relays them."""
+    from quietcheck.notify import claim_relay
+    return claim_relay()
+
+
 @app.post("/api/alarms/ack")
 async def ack(payload: dict):
     fleet.ack_alarm(int(payload.get("id", 0)))
