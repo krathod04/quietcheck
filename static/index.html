@@ -11,7 +11,7 @@
 :root{
   --bg:#0b0e13; --panel:#121720; --panel2:#171d28; --line:#232b38; --text:#e6edf3; --muted:#8b96a5;
   --ok:#3fb950; --watch:#d29922; --comms:#58a6ff; --net:#a371f7; --grid:#8b949e; --trip:#f0883e;
-  --hw:#f85149; --unk:#e3b341; --risk:#db61a2; --spoof:#39d0d8; --accent:#f0883e;
+  --hw:#f85149; --unk:#e3b341; --risk:#db61a2; --spoof:#39d0d8; --accent:#f0883e; --gw:#d4e157;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.4 "IBM Plex Sans",system-ui,sans-serif}
@@ -80,6 +80,37 @@ tr.gasp td{color:var(--hw)} tr.backlog td{color:var(--comms)}
 .leaflet-container{background:#0d1117}
 .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.8) contrast(.9) saturate(.35)}
 .leaflet-tooltip{background:var(--panel);color:var(--text);border:1px solid var(--line)}
+.tk{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer}
+.tk .top{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
+.tk .top .chip{color:#0b0e13;font-weight:600;border-radius:4px;padding:1px 6px;font-size:11px}
+.tk .ttl{margin-top:4px;font-weight:600}
+.tk .sub{font-size:12px;color:var(--muted);margin-top:2px}
+.tk.closed{opacity:.6}
+.tk .save{color:var(--ok)}
+#tickets{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow-y:auto}
+.tsum{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px}
+.tsum a{color:var(--comms);margin-left:auto}
+.rep{margin:6px 0;padding-left:18px}
+.rep li{margin:3px 0}
+.tl{font-size:12px;border-left:2px solid var(--line);padding-left:10px;margin:6px 0}
+.tl div{margin:4px 0}
+.members{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}
+.members button{padding:2px 6px;font-size:11px;font-family:"IBM Plex Mono",monospace}
+.vs{display:flex;gap:10px;margin:10px 0}
+.vs div{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.vs b{font:600 22px "IBM Plex Mono",monospace;display:block}
+#alarm{position:fixed;inset:0;background:rgba(5,7,10,.6);z-index:2000;display:none;align-items:center;justify-content:center}
+#alarm .box{width:min(520px,92vw);background:var(--panel);border:2px solid var(--hw);border-radius:14px;padding:20px 22px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+#alarm.info .box{border-color:var(--gw)}
+#alarm h2{margin:0 0 4px;font-size:20px;display:flex;gap:10px;align-items:center}
+#alarm .lvl{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.1em;color:var(--hw)}
+#alarm.info .lvl{color:var(--gw)}
+#alarm ul{margin:12px 0;padding-left:20px}
+#alarm li{margin:6px 0}
+#alarm .btns{display:flex;gap:8px;justify-content:flex-end}
+#alarm .btns .pri{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600}
+.gwicon{width:14px;height:14px;background:var(--gw);border:2px solid #111;transform:rotate(45deg)}
+.leaflet-tooltip.gwtip{background:#1d2310;border-color:var(--gw);color:var(--gw);font-weight:600}
 @media (max-width:900px){main{grid-template-columns:1fr;height:auto}#left{height:70vh}#detail{width:calc(100% - 24px)}}
 </style>
 </head>
@@ -106,6 +137,9 @@ tr.gasp td{color:var(--hw)} tr.backlog td{color:var(--comms)}
       <canvas id="chart"></canvas>
     </div>
   </div>
+  <div id="alarm"><div class="box"><div class="lvl" id="alarmLvl">ALARM</div><h2 id="alarmTitle"></h2>
+    <ul id="alarmLines"></ul>
+    <div class="btns"><button id="alarmView">View ticket</button><button class="pri" id="alarmAck">Acknowledge</button></div></div></div>
   <aside>
     <section>
       <h3>Tonight's picture</h3>
@@ -123,6 +157,11 @@ tr.gasp td{color:var(--hw)} tr.backlog td{color:var(--comms)}
       <div class="legend" id="legend"></div>
     </section>
     <section>
+      <h3>Investigation tickets</h3>
+      <div class="tsum" id="tsum"></div>
+      <div id="tickets"><div class="muted small">No incidents yet. Inject a fault or turn on a heatwave.</div></div>
+    </section>
+    <section>
       <h3>Inject a fault</h3>
       <div class="target" id="target">Target: <b>random battery</b> — click a home on the map to choose one</div>
       <div class="faults">
@@ -134,6 +173,7 @@ tr.gasp td{color:var(--hw)} tr.backlog td{color:var(--comms)}
         <button data-k="heatwave" id="heatBtn">Heatwave</button>
         <div class="row"><select id="feederSel"></select><button data-k="feeder_outage" data-sel="feederSel">Black out feeder</button></div>
         <div class="row"><select id="carrierSel"></select><button data-k="carrier_outage" data-sel="carrierSel">Drop carrier</button></div>
+        <div class="row"><select id="gatewaySel"><option value="">random gateway</option></select><button data-k="gateway_fail" data-sel="gatewaySel">Fail gateway</button></div>
         <div class="row"><button data-k="restore" style="flex:1">Restore grid + networks</button></div>
       </div>
     </section>
@@ -149,17 +189,19 @@ tr.gasp td{color:var(--hw)} tr.backlog td{color:var(--comms)}
 const LABELS = {
   OK:{c:'--ok',t:'Healthy'}, WATCH:{c:'--watch',t:'Missed check-ins'},
   COMMS_LOSS:{c:'--comms',t:'Comms loss'}, NETWORK_OUTAGE:{c:'--net',t:'Carrier outage'},
-  GRID_OUTAGE:{c:'--grid',t:'Grid outage'}, TRIPPED:{c:'--trip',t:'Tripped'},
+  GRID_OUTAGE:{c:'--grid',t:'Grid outage'}, GATEWAY_FAULT:{c:'--gw',t:'Gateway fault'}, TRIPPED:{c:'--trip',t:'Tripped'},
   HARDWARE_FAILING:{c:'--hw',t:'Hardware failure'}, UNKNOWN:{c:'--unk',t:'Unknown'},
   AT_RISK:{c:'--risk',t:'At risk'}, TELEMETRY_MISMATCH:{c:'--spoof',t:'Talking but wrong'},
 };
+const TKCOL = {HEATWAVE_PREP:'--hw', HEAT_WATCH:'--watch', GATEWAY_FAULT:'--gw'};
 const EVCOL = {ASK:'--trip',DISPATCH:'--hw',RESOLVED:'--ok',REPLY:'--comms',LAST_GASP:'--hw',BACKLOG:'--comms',INJECT:'--grid',OK:'--ok'};
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const color = l => css((LABELS[l]||LABELS.OK).c);
 const $ = id => document.getElementById(id);
 const api = (p, body) => fetch(p, body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
 
-let markers = {}, info = {}, lastLabel = {}, selected = null, lastSeq = 0, detailOpen = null;
+let markers = {}, info = {}, lastLabel = {}, selected = null, lastSeq = 0, detailOpen = null, ticketOpen = null;
+let gateways = {}, gwDown = new Set(), shownAlarm = null;
 
 // ---- map: Leaflet when online, a self-drawn canvas map when the CDN is unreachable
 const MapView = window.L ? leafletMap() : canvasMap();
@@ -184,6 +226,11 @@ function leafletMap(){
       m.setRadius(real ? 11 : label==='OK' ? (b.medical?6:4) : (b.medical?9:7));
       if (label!=='OK' || real) m.bringToFront(); },
     focus(id){ ms[id] && map.panTo(ms[id].getLatLng()); },
+    gw(g, on){ ms['gw:'+g.id] && (map.removeLayer(ms['gw:'+g.id]), delete ms['gw:'+g.id]);
+      if (!on) return;
+      const m = L.marker([g.lat,g.lon], {icon:L.divIcon({className:'', html:'<div class="gwicon"></div>', iconSize:[14,14]})}).addTo(map);
+      m.bindTooltip(`${g.id} down · 1 engineer`, {permanent:true, direction:'left', offset:[-10,0], className:'gwtip'});
+      ms['gw:'+g.id] = m; },
     draw(){}
   };
 }
@@ -218,6 +265,9 @@ function canvasMap(){
       if (p.medical){ g.lineWidth=1.5; g.strokeStyle='#fff'; g.stroke(); }
       if (p.id===selected){ g.lineWidth=2; g.strokeStyle='#fff'; g.beginPath(); g.arc(x,y,r+4,0,7); g.stroke(); }
     }
+    for (const id of gwDown){ const gw = gateways[id]; if (!gw) continue; const [x,y] = proj(gw);
+      g.save(); g.translate(x,y); g.rotate(Math.PI/4); g.fillStyle=css('--gw'); g.fillRect(-7,-7,14,14); g.restore();
+      g.fillStyle=css('--gw'); g.font='600 12px IBM Plex Sans'; g.fillText(id+' down · 1 engineer', x+12, y+4); }
   }
   c.addEventListener('click', e => {
     if (!proj) return; const r = c.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
@@ -230,7 +280,7 @@ function canvasMap(){
   return {
     add(b){ const p = {...b, label:'OK', medical: b.medical || b.feeder==='EXT'}; pts.push(p); byId[b.id]=p; },
     set(id,label){ byId[id].label = label; },
-    focus(){}, draw
+    focus(){}, gw(){ }, draw
   };
 }
 
@@ -247,7 +297,7 @@ function select(id){
 }
 
 async function openDetail(id){
-  detailOpen = id;
+  detailOpen = id; ticketOpen = null;
   const d = await api('/api/battery/'+id);
   if (d.detail) return;
   const steps = d.ladder_steps, idx = steps.indexOf(d.ladder);
@@ -263,11 +313,72 @@ async function openDetail(id){
       <ul class="reasons small">${d.reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
     <div class="ladder">${lad}</div>
     ${contacts?`<div style="margin:8px 0">${contacts}</div>`:''}
+    ${d.gateway?`<div class="small muted">Gateway <b class="mono" style="color:var(--text)">${d.gateway}</b></div>`:''}
+    <h3 style="margin:12px 0 6px;font-size:12px;color:var(--muted);letter-spacing:.08em">TICKET HISTORY (${(d.tickets||[]).length})</h3>
+    ${(d.tickets||[]).length?`<table><tr><th>ticket</th><th>kind</th><th>opened</th><th>status</th></tr>${d.tickets.map(t=>
+      `<tr style="cursor:pointer" onclick="openTicket('${t.id}')"><td>${t.id}</td><td>${t.title.split(':')[0]}</td><td>t${t.opened_tick}</td><td>${t.status==='open'?'open':'closed t'+t.closed_tick}</td></tr>`).join('')}</table>`
+      :'<div class="small muted">No incidents recorded for this house.</div>'}
     <h3 style="margin:12px 0 6px;font-size:12px;color:var(--muted);letter-spacing:.08em">BLACK BOX — LAST ${d.blackbox.length} RECORDS</h3>
     <table><tr><th>tick</th><th>mode</th><th>kW</th><th>SoC%</th><th>°C</th><th>V</th><th>fault</th></tr>${rows}</table>`;
   $('detail').style.display = 'block';
 }
-function closeDetail(){ $('detail').style.display='none'; detailOpen=null; }
+function closeDetail(){ $('detail').style.display='none'; detailOpen=null; ticketOpen=null; }
+
+const tkcol = k => css(TKCOL[k] || (LABELS[k]||{}).c || '--grid');
+async function openTicket(id){
+  ticketOpen = id; detailOpen = null;
+  const t = await api('/api/tickets/'+id);
+  if (t.detail) return;
+  const col = tkcol(t.kind);
+  const vs = t.scope==='fleet' ? '' : `<div class="vs"><div><span class="small muted">Naive system</span><b>${t.naive_visits}</b><span class="small muted">visit${t.naive_visits===1?'':'s'}</span></div>
+     <div><span class="small muted">QuietCheck</span><b style="color:var(--ok)">${t.our_visits}</b><span class="small muted">${t.scope==='gateway'?'engineer':'visit'}${t.our_visits===1?'':'s'}</span></div></div>`;
+  const members = t.batteries.length ? `<div class="small muted" style="margin-top:8px">${t.scope==='fleet'?'Heat-watch batteries':'Houses on this ticket'} (${t.batteries.length})</div>
+     <div class="members">${t.batteries.map(b=>`<button onclick="select('${b}');MapView.focus('${b}')">${b}</button>`).join('')}</div>` : '';
+  $('detail').innerHTML = `<button class="close" onclick="closeDetail()">✕</button>
+    <div class="small muted mono">${t.id} · ${t.scope} · ${t.severity} · ${t.status==='open'?'OPEN since t'+t.opened_tick:'closed t'+t.closed_tick}</div>
+    <h2 style="margin-top:4px"><span class="dot" style="background:${col}"></span>${t.title}</h2>
+    ${vs}
+    <h3 style="margin:12px 0 4px;font-size:12px;color:var(--muted);letter-spacing:.08em">INVESTIGATION REPORT${t.confidence?` · ${Math.round(t.confidence*100)}% CONFIDENCE`:''}</h3>
+    <ul class="rep small">${t.report.map(r=>`<li>${r}</li>`).join('')}</ul>
+    <h3 style="margin:12px 0 4px;font-size:12px;color:var(--muted);letter-spacing:.08em">ACTIONS</h3>
+    <ul class="rep small">${t.actions.map(r=>`<li>${r}</li>`).join('')}</ul>
+    ${members}
+    <h3 style="margin:12px 0 4px;font-size:12px;color:var(--muted);letter-spacing:.08em">TIMELINE</h3>
+    <div class="tl">${t.timeline.length?t.timeline.map(e=>`<div><span class="mono muted">t${e.tick}</span> ${e.text}</div>`).join(''):'<div class="muted">Opened t'+t.opened_tick+'</div>'}</div>
+    ${t.resolution?`<div class="small"><b>Resolution:</b> ${t.resolution}</div>`:''}`;
+  $('detail').style.display = 'block';
+}
+
+function renderTickets(list, sum){
+  if (!sum) return;
+  $('tsum').innerHTML = `<span><b style="color:var(--text)">${sum.open}</b> open</span><span>${sum.total} total</span>
+    <span>visits <b class="mono" style="color:var(--text)">${sum.visits_ours}</b> vs naive ${sum.visits_naive}</span><a href="/api/tickets.csv">Export CSV</a>`;
+  if (!list.length) return;
+  $('tickets').innerHTML = list.map(t=>{
+    const col = tkcol(t.kind);
+    const save = t.scope==='gateway' ? `<span class="save">1 engineer instead of ${t.n} visits</span>`
+      : t.scope==='fleet' ? `<span class="save">acting before the peak</span>`
+      : t.scope==='carrier'||t.scope==='feeder' ? `<span class="save">${t.n} batteries, no truck rolls</span>`
+      : t.kind==='HEAT_WATCH' ? 'watching temperature' : (t.our_visits ? 'technician dispatched' : '<span class="save">handled remotely</span>');
+    return `<div class="tk ${t.status}" style="border-left-color:${col}" onclick="openTicket('${t.id}')">
+      <div class="top"><span class="chip" style="background:${col}">${t.kind.replace(/_/g,' ')}</span><span class="mono">${t.id}</span>
+      <span class="spacer"></span><span class="mono">${t.status==='open'?'open · t'+t.opened_tick:'closed · t'+t.closed_tick}</span></div>
+      <div class="ttl">${t.title}</div><div class="sub">${save}</div></div>`;}).join('');
+}
+
+function showAlarm(alarms){
+  const a = alarms[alarms.length-1];
+  if (!a){ $('alarm').style.display='none'; shownAlarm=null; return; }
+  if (shownAlarm === a.id) return;
+  shownAlarm = a.id;
+  $('alarm').className = a.level==='warning' ? '' : 'info';
+  $('alarmLvl').textContent = a.level==='warning' ? 'PRE-DISASTER ALARM · t'+a.tick : 'INVESTIGATION · t'+a.tick;
+  $('alarmTitle').textContent = a.title;
+  $('alarmLines').innerHTML = a.lines.map(l=>`<li>${l}</li>`).join('');
+  $('alarm').style.display = 'flex';
+  $('alarmAck').onclick = async () => { await api('/api/alarms/ack', {id:a.id}); $('alarm').style.display='none'; };
+  $('alarmView').onclick = async () => { await api('/api/alarms/ack', {id:a.id}); $('alarm').style.display='none'; if (a.ticket) openTicket(a.ticket); };
+}
 
 function renderLegend(counts){
   $('legend').innerHTML = Object.entries(LABELS).map(([k,v])=>
@@ -326,8 +437,13 @@ function renderMetrics(m){
   $('accN').textContent = `${m.accuracy.correct}/${m.accuracy.total} abnormal batteries named correctly`;
   $('blips').textContent = tr.blips_ignored;
   $('heatBtn').textContent = m.heatwave ? 'Heatwave: ON' : 'Heatwave';
+  const down = new Set(m.gateways_down||[]);
+  for (const g of gwDown) if (!down.has(g)) MapView.gw(gateways[g], false);
+  for (const g of down) if (!gwDown.has(g) && gateways[g]) MapView.gw(gateways[g], true);
+  gwDown = down;
   const conds = [];
-  if (m.heatwave) conds.push('<span class="pill hot">Heatwave</span>');
+  if (m.heatwave) conds.push(`<span class="pill hot">Heatwave${m.heat_plan?` · plan ${m.heat_plan.done||0}/${m.heat_plan.total||0} at target`:''}</span>`);
+  (m.gateways_down||[]).forEach(g=>conds.push(`<span class="pill hot" style="border-color:var(--gw);color:var(--gw)">${g} down</span>`));
   m.feeders_out.forEach(f=>conds.push(`<span class="pill hot">${f} dark</span>`));
   m.carriers_out.forEach(c=>conds.push(`<span class="pill hot">${c} down</span>`));
   $('conds').innerHTML = conds.join(' ');
@@ -344,26 +460,32 @@ async function poll(){
     }
     MapView.draw();
     renderMetrics(s.metrics); renderFeed(s.feed); drawChart(s.history);
+    renderTickets(s.tickets||[], s.metrics.tickets); showAlarm(s.alarms||[]);
     $('pause').textContent = s.running ? 'Pause' : 'Resume';
     if (detailOpen) openDetail(detailOpen);
+    else if (ticketOpen) openTicket(ticketOpen);
   }catch(e){ console.warn(e); }
 }
 
 document.querySelectorAll('[data-k]').forEach(b => b.onclick = async () => {
   const k = b.dataset.k;
   let target = null;
-  if (b.dataset.sel) target = $(b.dataset.sel).value;
+  if (b.dataset.sel) target = $(b.dataset.sel).value || (k==='gateway_fail' ? selected : null);
   else if (['comms_loss','trip','trip_silent','hw_fail','spoof'].includes(k)) target = selected;
   await api('/api/inject', {kind:k, target}); poll();
 });
 $('pause').onclick = async () => { await api('/api/pause', {}); poll(); };
-$('reset').onclick = async () => { await api('/api/reset', {}); lastSeq=0; $('feed').innerHTML=''; closeDetail(); poll(); };
+$('reset').onclick = async () => { await api('/api/reset', {}); lastSeq=0; $('feed').innerHTML='';
+  $('tickets').innerHTML='<div class="muted small">No incidents yet. Inject a fault or turn on a heatwave.</div>'; closeDetail(); poll(); };
 
 (async () => {
   const d = await api('/api/init');
   d.batteries.forEach(addMarker);
   $('feederSel').innerHTML = d.options.feeders.map(f=>`<option>${f}</option>`).join('');
   $('carrierSel').innerHTML = d.options.carriers.map(f=>`<option>${f}</option>`).join('');
+  (d.gateways||[]).forEach(g => gateways[g.id] = g);
+  $('gatewaySel').innerHTML = '<option value="">random gateway (or selected home\'s)</option>' +
+    (d.gateways||[]).map(g=>`<option value="${g.id}">${g.id} · ${g.n} homes</option>`).join('');
   poll(); setInterval(poll, 1000);
 })();
 </script>
