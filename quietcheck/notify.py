@@ -70,3 +70,16 @@ class Notifier:
             title, body, prio, tag = MESSAGES[b.label]
             threading.Thread(target=_send, args=(title, body.format(id=b.id), prio, tag),
                              daemon=True).start()
+
+    def alarms(self, alarms: list) -> None:
+        """Operator alerts (heatwave plan, gateway down): push each new alarm once."""
+        if not TOPIC:
+            return
+        for a in alarms:
+            key = f"alarm-{a['id']}-{a['tick']}-{a['title']}"
+            if key in self.last:
+                continue
+            self.last[key] = "sent"
+            prio, tag = ("high", "thermometer") if a["level"] == "warning" else ("default", "satellite_antenna")
+            body = "\n".join(a["lines"][:3])
+            threading.Thread(target=_send, args=(a["title"], body, prio, tag), daemon=True).start()

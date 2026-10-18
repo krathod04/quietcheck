@@ -35,6 +35,7 @@ LABELS = {
     "COMMS_LOSS":         {"title": "Comms loss",           "silent": True},
     "NETWORK_OUTAGE":     {"title": "Carrier outage",       "silent": True},
     "GRID_OUTAGE":        {"title": "Grid outage",          "silent": True},
+    "GATEWAY_FAULT":      {"title": "Gateway fault",        "silent": True},
     "TRIPPED":            {"title": "Battery tripped",      "silent": True},
     "HARDWARE_FAILING":   {"title": "Hardware failure",     "silent": True},
     "UNKNOWN":            {"title": "Unknown",              "silent": True},
@@ -51,6 +52,7 @@ class BatteryState:
     feeder: str
     carrier: str
     medical: bool = False
+    gateway: str | None = None      # neighbourhood comms gateway shared with nearby homes
     max_kw: float = 5.0
     external: bool = False          # a real device (ESP32) rather than simulated
     last_seen: int = -1
@@ -89,6 +91,8 @@ class Engine:
         self.stats = {"blips_ignored": 0, "trucks_avoided": 0, "trucks_sent": 0,
                       "resolved_remotely": 0}
         self._seq = 0
+        self.gateway_dispatched: dict[str, int] = {}   # gateway -> tick one engineer was sent
+        self.work_orders: list[dict] = []              # engineer visits for the outside world
 
     # ================================================================ ingest
     def register(self, info: dict, external: bool = False) -> BatteryState:
@@ -98,7 +102,8 @@ class Engine:
                              lon=info.get("lon", -118.2856),
                              feeder=info.get("feeder", "EXT"), carrier=info.get("carrier", "WiFi"),
                              medical=bool(info.get("medical", False)),
-                             max_kw=float(info.get("max_kw", 5.0)), external=external)
+                             max_kw=float(info.get("max_kw", 5.0)), external=external,
+                             gateway=info.get("gateway") or None)
             self.batteries[b.id] = b
             self.meters.setdefault(b.id, MeterState())
         return b
@@ -155,11 +160,13 @@ class Engine:
         self.heatwave = heatwave
         feeder_stats = self._feeder_stats(tick)
         carrier_stats = self._carrier_stats(tick)
+        self._gw_stats = self._gateway_stats(tick)
 
         for b in self.batteries.values():
             missed = tick - b.last_seen if b.last_seen >= 0 else 0
             if missed >= DIAGNOSE_AFTER:
-                label, conf, reasons = self._diagnose_silent(b, tick, feeder_stats, carrier_stats)
+                label, conf, reasons = self._diagnose_silent(b, tick, feeder_stats, carrier_stats,
+                                                             self._gw_stats)
                 self._set(b, label, conf, reasons, tick)
                 self._advance_ladder(b, tick)
             elif missed >= WATCH_AFTER:
@@ -171,9 +178,14 @@ class Engine:
                 self._set(b, label, conf, reasons, tick)
                 if label == "OK":
                     b.ladder = None
+        # a repaired gateway can be dispatched to again next time
+        live = {b.gateway for b in self.batteries.values() if b.label == "GATEWAY_FAULT"}
+        for g in list(self.gateway_dispatched):
+            if g not in live:
+                del self.gateway_dispatched[g]
 
     # ---------------------------------------------------------------- silent
-    def _diagnose_silent(self, b, tick, feeder_stats, carrier_stats):
+    def _diagnose_silent(self, b, tick, feeder_stats, carrier_stats, gw_stats=None):
         reasons = []
         m = self.meters.get(b.id)
         meter_alive = m is not None and m.last_seen >= 0 and tick - m.last_seen < DIAGNOSE_AFTER
@@ -216,6 +228,20 @@ class Engine:
             reasons.append(f"Pattern matches a carrier outage, not {cs['silent']} separate battery faults")
             return "NETWORK_OUTAGE", 0.9, reasons
 
+        # 4b. Several neighbours behind the same gateway silent at once, meters fine, carrier fine:
+        #     the shared gateway failed, not each battery. One engineer, not one visit per home.
+        gs = (gw_stats or {}).get(b.gateway) if b.gateway else None
+        if meter_alive and gs and gs["silent"] >= 3 and gs["silent_frac"] >= 0.6:
+            reasons.append(f"{gs['silent']}/{gs['total']} batteries behind gateway {b.gateway} went quiet "
+                           f"within {gs['spread'] + 1} check-in(s) of each other")
+            reasons.append("Their smart meters still show each home's battery covering its load")
+            if cs:
+                others = cs["total"] - cs["silent"]
+                reasons.append(f"{others} other {b.carrier} batteries are still reporting: not a carrier outage")
+            reasons.append(f"Common point of failure: gateway {b.gateway}. One engineer to the gateway "
+                           f"instead of {gs['silent']} home visits")
+            return "GATEWAY_FAULT", 0.92, reasons
+
         # 5. Smart meter evidence for this one home
         if meter_alive:
             if self._meter_jump(b, last):
@@ -244,6 +270,10 @@ class Engine:
                 reasons.append(f"No meter of its own, but {cs['silent']}/{cs['total']} metered batteries on "
                                f"{b.carrier} went quiet together")
                 return "NETWORK_OUTAGE", 0.78, reasons
+            if gs and gs["silent"] >= 3 and gs["silent_frac"] >= 0.5:
+                reasons.append(f"No meter of its own, but {gs['silent']}/{gs['total']} metered neighbours behind "
+                               f"gateway {b.gateway} went quiet at the same time")
+                return "GATEWAY_FAULT", 0.75, reasons
             reasons.append("No smart meter paired with this unit and its neighbours look fine")
         else:
             reasons.append("This home's meter is also silent, but the feeder is mostly fine")
@@ -351,6 +381,27 @@ class Engine:
             s["meter_silent_frac"] = s["meter_silent"] / s["meters"] if s["meters"] else 0
         return stats
 
+    def _gateway_stats(self, tick):
+        """Per gateway: how many of its batteries went silent (no last gasp) while their meters
+        still report, and how close together they stopped."""
+        stats = {}
+        for b in self.batteries.values():
+            if not b.gateway or b.last_seen < 0:
+                continue
+            s = stats.setdefault(b.gateway, {"total": 0, "silent": 0, "stops": [], "ids": []})
+            s["total"] += 1
+            m = self.meters.get(b.id)
+            meter_alive = m and m.last_seen >= 0 and tick - m.last_seen < DIAGNOSE_AFTER
+            gasped = b.last_gasp and b.last_gasp.get("tick", -1) >= b.last_seen - 1
+            if tick - b.last_seen >= DIAGNOSE_AFTER and meter_alive and not gasped:
+                s["silent"] += 1
+                s["stops"].append(b.last_seen)
+                s["ids"].append(b.id)
+        for s in stats.values():
+            s["silent_frac"] = s["silent"] / s["total"] if s["total"] else 0
+            s["spread"] = (max(s["stops"]) - min(s["stops"])) if s["stops"] else 0
+        return stats
+
     def _carrier_stats(self, tick):
         stats = {}
         for b in self.batteries.values():
@@ -386,6 +437,8 @@ class Engine:
             "COMMS_LOSS": "Ping over fallback path (meter network). Keep its capacity. No truck.",
             "NETWORK_OUTAGE": "Hold and wait it out. Flag the carrier. Keep its capacity. No truck.",
             "GRID_OUTAGE": "Hand to the utility. Battery is backing up the home. No truck.",
+            "GATEWAY_FAULT": (f"Shared gateway {b.gateway} is down. Batteries keep running; hold their capacity. "
+                              "One engineer to the gateway, no home visits."),
             "TRIPPED": ("Call the homeowner with reset steps (medical-device home, priority)."
                         if b.medical else "Text the homeowner reset steps. Hold its capacity."),
             "HARDWARE_FAILING": "Remove from dispatch. Send a technician with replacement parts.",
@@ -405,6 +458,17 @@ class Engine:
                 self._ask(b, tick, "router")
         elif L == "NETWORK_OUTAGE":
             b.ladder = b.ladder if b.ladder == "HOLD" else "HOLD"
+        elif L == "GATEWAY_FAULT":
+            b.ladder = "HOLD"
+            g = b.gateway
+            if g and g not in self.gateway_dispatched:
+                self.gateway_dispatched[g] = tick
+                self.stats["trucks_sent"] += 1
+                n = (self._gw_stats.get(g) or {}).get("silent", 0)
+                self.stats["trucks_avoided"] += max(0, n - 1)
+                self.work_orders.append({"gateway": g, "tick": tick, "homes": n})
+                self._event(b, "DISPATCH", f"One engineer dispatched to gateway {g} (covers {n} silent homes). "
+                            f"{max(0, n - 1)} home visits avoided.", kind="dispatch")
         elif L == "GRID_OUTAGE":
             b.ladder = "DISPATCH" if b.ladder == "DISPATCH" else "HOLD"
         elif L in ("TRIPPED", "UNKNOWN"):
@@ -467,8 +531,9 @@ class Engine:
             msg = {"TRIPPED": "Back online after the homeowner reset it",
                    "COMMS_LOSS": "Back online -- confirmed it was only a comms loss",
                    "NETWORK_OUTAGE": "Back online as the carrier recovered",
+                   "GATEWAY_FAULT": f"Back online: engineer repaired gateway {b.gateway}",
                    "GRID_OUTAGE": "Back online as the feeder was restored"}.get(prev, "Back online")
-            if not b.dispatched:
+            if not b.dispatched and prev != "GATEWAY_FAULT":
                 self.stats["trucks_avoided"] += 1
                 self.stats["resolved_remotely"] += 1
                 msg += ". Truck avoided."
@@ -492,7 +557,7 @@ class Engine:
             usable = b.max_kw if soc > 20 else 0
             if b.label in ("OK", "AT_RISK", "TELEMETRY_MISMATCH", "WATCH"):
                 naive += usable  # a naive system trusts anything that talks
-            if b.label in ("OK", "WATCH", "COMMS_LOSS", "NETWORK_OUTAGE"):
+            if b.label in ("OK", "WATCH", "COMMS_LOSS", "NETWORK_OUTAGE", "GATEWAY_FAULT"):
                 ours += usable
             elif b.label == "AT_RISK":
                 ours += usable * 0.5
@@ -509,6 +574,7 @@ class Engine:
         if not b:
             return None
         return {"id": b.id, "feeder": b.feeder, "carrier": b.carrier, "medical": b.medical,
+                "gateway": b.gateway,
                 "label": b.label, "title": LABELS[b.label]["title"], "confidence": b.confidence,
                 "reasons": b.reasons, "ladder": b.ladder, "ladder_steps": LADDER,
                 "last_seen": b.last_seen, "external": b.external,

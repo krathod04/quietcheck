@@ -32,6 +32,7 @@ class SimBattery:
     carrier: str
     medical: bool
     has_meter: bool = True
+    gateway: str = ""         # neighbourhood comms gateway the battery talks through
     capacity_kwh: float = 13.5
     max_kw: float = 5.0
     soc: float = 70.0
@@ -48,6 +49,8 @@ class SimBattery:
     send_last_gasp: bool = True
     gasped: bool = False
     pending_reply: tuple | None = None  # (tick_due, kind)
+    precharge_to: float = 0.0           # heat plan: charge to this % before the peak
+    derate_kw: float = 0.0              # heat plan: cap discharge at this many kW
 
     @property
     def hw_failed(self) -> bool:
@@ -65,6 +68,8 @@ class Simulator:
     blip_rate: float = 0.004  # chance a healthy check-in is randomly dropped
     replies: list = field(default_factory=list)
     region: str = DEFAULT_REGION
+    gateways_out: set = field(default_factory=set)
+    repairs: dict = field(default_factory=dict)  # gateway -> tick the engineer fixes it
 
     def __post_init__(self):
         self.rng = random.Random(self.seed)
@@ -87,6 +92,49 @@ class Simulator:
             )
             b.setpoint_kw = self._new_setpoint()
             self.batteries[b.id] = b
+        self._assign_gateways()
+
+    # ------------------------------------------------------------------ gateways
+    GATEWAY_SIZE = 8
+
+    def _assign_gateways(self) -> None:
+        """Group each feeder's homes into neighbourhood gateways of ~8, by direction from the
+        feeder centre, so a gateway covers one patch of streets."""
+        self.gateways: dict[str, dict] = {}
+        for fi, (fname, flat, flon) in enumerate(self.feeders):
+            homes = [b for b in self.batteries.values() if b.feeder == fname]
+            homes.sort(key=lambda b: math.atan2(b.lat - flat, b.lon - flon))
+            code = fname.split()[0]
+            for k in range(0, len(homes), self.GATEWAY_SIZE):
+                gid = f"GW-{code}-{k // self.GATEWAY_SIZE + 1}"
+                members = homes[k:k + self.GATEWAY_SIZE]
+                for b in members:
+                    b.gateway = gid
+                self.gateways[gid] = {
+                    "id": gid, "feeder": fname, "n": len(members),
+                    "lat": round(sum(b.lat for b in members) / len(members), 5),
+                    "lon": round(sum(b.lon for b in members) / len(members), 5)}
+
+    def dispatch_gateway(self, gid: str, ticks: int = 10) -> None:
+        """An engineer is on the way: the gateway comes back after `ticks`."""
+        if gid in self.gateways_out and gid not in self.repairs:
+            self.repairs[gid] = self.tick + ticks
+
+    # ------------------------------------------------------------------ heat plan
+    def precharge(self, battery_id: str, to_pct: float = 90.0) -> None:
+        b = self.batteries.get(battery_id)
+        if b:
+            b.precharge_to = to_pct
+
+    def derate(self, battery_id: str, kw: float) -> None:
+        b = self.batteries.get(battery_id)
+        if b:
+            b.derate_kw = kw
+
+    def clear_heat_plan(self) -> None:
+        for b in self.batteries.values():
+            b.precharge_to = 0.0
+            b.derate_kw = 0.0
 
     # ------------------------------------------------------------------ setup
     def _new_setpoint(self) -> float:
@@ -100,7 +148,8 @@ class Simulator:
     def static_info(self) -> list[dict]:
         return [
             {"id": b.id, "lat": round(b.lat, 5), "lon": round(b.lon, 5), "feeder": b.feeder,
-             "carrier": b.carrier, "medical": b.medical, "max_kw": b.max_kw, "has_meter": b.has_meter}
+             "carrier": b.carrier, "medical": b.medical, "max_kw": b.max_kw, "has_meter": b.has_meter,
+             "gateway": b.gateway}
             for b in self.batteries.values()
         ]
 
@@ -110,7 +159,8 @@ class Simulator:
         rng = self.rng
         healthy = [b for b in self.batteries.values()
                    if not (b.comms_down or b.tripped or b.hw_stage or b.spoof)
-                   and b.feeder not in self.feeders_out and b.carrier not in self.carriers_out]
+                   and b.feeder not in self.feeders_out and b.carrier not in self.carriers_out
+                   and b.gateway not in self.gateways_out]
 
         def pick() -> SimBattery:
             if target and target in self.batteries:
@@ -144,11 +194,23 @@ class Simulator:
                 [c for c in self.carriers if c not in self.carriers_out] or self.carriers)
             self.carriers_out.add(c)
             return f"Cellular outage: {c} network down"
+        if kind == "gateway_fail":
+            if target in self.gateways:
+                g = target
+            elif target in self.batteries:
+                g = self.batteries[target].gateway
+            else:
+                ok = [g for g, v in self.gateways.items() if g not in self.gateways_out
+                      and v["feeder"] not in self.feeders_out and v["n"] >= 5]
+                g = rng.choice(ok)
+            self.gateways_out.add(g)
+            return f"Neighbourhood gateway {g} failed ({self.gateways[g]['n']} homes lose comms; batteries keep running)"
         if kind == "heatwave":
             self.heatwave = not self.heatwave
             return f"Heatwave {'ON (ambient 42 C)' if self.heatwave else 'OFF'}"
         if kind == "restore":
             self.feeders_out.clear(); self.carriers_out.clear()
+            self.gateways_out.clear(); self.repairs.clear()
             for b in self.batteries.values():
                 b.comms_down = False
             return "Grid feeders and networks restored"
@@ -171,6 +233,8 @@ class Simulator:
             return "TRIPPED"
         if b.carrier in self.carriers_out:
             return "NETWORK_OUTAGE"
+        if b.gateway in self.gateways_out:
+            return "GATEWAY_FAULT"
         if b.comms_down:
             return "COMMS_LOSS"
         if b.spoof:
@@ -198,6 +262,10 @@ class Simulator:
         checkins, gasps, meters = [], [], []
         self.replies = []
         ambient = 42.0 if self.heatwave else 26.0
+        for g, due in list(self.repairs.items()):
+            if t >= due:
+                self.gateways_out.discard(g)
+                del self.repairs[g]
 
         for b in self.batteries.values():
             # homeowner replies to an earlier text/call
@@ -222,6 +290,12 @@ class Simulator:
                 actual_kw = min(b.home_load_kw, b.max_kw) if b.soc > 5 else 0.0  # islanding
             else:
                 actual_kw = b.setpoint_kw
+                if b.precharge_to and b.soc < b.precharge_to:
+                    actual_kw = -b.max_kw            # heat plan: fill up before the peak
+                elif b.precharge_to:
+                    actual_kw = min(actual_kw, 0.0)  # hold the reserve
+                if b.derate_kw and actual_kw > b.derate_kw:
+                    actual_kw = b.derate_kw
                 if actual_kw > 0 and b.soc <= 10:
                     actual_kw = 0.0
                 if actual_kw < 0 and b.soc >= 99:
@@ -236,12 +310,13 @@ class Simulator:
             # last gasp on the tick the battery trips
             if b.tripped and b.send_last_gasp and not b.gasped:
                 b.gasped = True
-                if not (b.comms_down or grid_down or b.carrier in self.carriers_out):
+                if not (b.comms_down or grid_down or b.carrier in self.carriers_out
+                        or b.gateway in self.gateways_out):
                     gasps.append(self._record(b, 0.0, fault="TRIP", last_gasp=True))
 
             # regular check-in
             silent = (b.comms_down or b.tripped or b.hw_failed or grid_down
-                      or b.carrier in self.carriers_out)
+                      or b.carrier in self.carriers_out or b.gateway in self.gateways_out)
             if not silent and rng.random() > self.blip_rate:
                 if b.spoof:
                     rec = self._record(b, 5.0)
@@ -280,7 +355,7 @@ class Simulator:
             msg = "Restarted the router"
         elif b.feeder in self.feeders_out:
             msg = "Whole street is dark, battery is keeping our lights on"
-        elif b.carrier in self.carriers_out:
+        elif b.carrier in self.carriers_out or b.gateway in self.gateways_out:
             msg = "Battery screen looks normal"
         else:
             msg = "Everything looks normal here"
