@@ -450,6 +450,18 @@ function renderMetrics(m){
   renderLegend(m.counts);
 }
 
+// Phone alerts the server couldn't deliver (ntfy rate-limits shared cloud IPs): send them from this browser.
+const PRIO = {min:1, low:2, default:3, high:4, urgent:5};
+async function relayAlerts(){
+  try{
+    const r = await api('/api/push/claim', {});
+    if (!r.topic) return;
+    for (const a of r.items||[])
+      await fetch(r.server + '/', {method:'POST', body: JSON.stringify({topic:r.topic, title:a.title, message:a.message,
+        priority: PRIO[a.priority]||3, tags:a.tags})});
+  }catch(e){ console.warn('relay', e); }
+}
+
 async function poll(){
   try{
     const s = await api('/api/state?since='+lastSeq);
@@ -461,6 +473,7 @@ async function poll(){
     MapView.draw();
     renderMetrics(s.metrics); renderFeed(s.feed); drawChart(s.history);
     renderTickets(s.tickets||[], s.metrics.tickets); showAlarm(s.alarms||[]);
+    relayAlerts();
     $('pause').textContent = s.running ? 'Pause' : 'Resume';
     if (detailOpen) openDetail(detailOpen);
     else if (ticketOpen) openTicket(ticketOpen);
