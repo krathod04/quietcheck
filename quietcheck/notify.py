@@ -40,13 +40,30 @@ MESSAGES = {
 }
 
 
+RELAY: list = []          # alerts the server could not deliver; the open dashboard sends them instead
+_LOCK = threading.Lock()
+
+
 def _send(title: str, body: str, priority: str, tag: str) -> None:
     try:
         req = urllib.request.Request(f"{SERVER}/{TOPIC}", data=body.encode(), method="POST",
-                                     headers={"Title": title, "Priority": priority, "Tags": tag})
+                                     headers={"Title": title.encode("latin-1", "replace").decode("latin-1"),
+                                              "Priority": priority, "Tags": tag})
         urllib.request.urlopen(req, timeout=8).read()
     except Exception as e:  # alerts are best-effort; never break the server
-        print("ntfy send failed:", e)
+        # ntfy.sh rate-limits by IP, and free cloud hosts share IPs: hand the alert to the browser
+        print("ntfy send failed, relaying via dashboard:", e)
+        with _LOCK:
+            RELAY.append({"title": title, "message": body, "priority": priority, "tags": [tag]})
+            del RELAY[:-20]
+
+
+def claim_relay() -> dict:
+    """Give queued alerts to one dashboard, which posts them to ntfy from its own connection."""
+    with _LOCK:
+        items = RELAY[:]
+        RELAY.clear()
+    return {"server": SERVER, "topic": TOPIC, "items": items}
 
 
 class Notifier:
